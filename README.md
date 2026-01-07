@@ -1,164 +1,229 @@
-# Cooperative or Competitive? Understanding the Interaction between Attention Heads From A Game Theory Perspective
+# GAC Extension: Comparing Cooperative Game-Theoretic Solution Concepts for Attention Head Analysis
 
-<!---[![License: MIT](https://img.shields.io/badge/License-MIT-g.svg)]()-->
-<!---[![Arxiv](https://img.shields.io/badge/arXiv-6666.66666-B21A1B)]()-->
-<!---[![Hugging Face Transformers](https://img.shields.io/badge/%F0%9F%A4%97-Transformers-blue)]()-->
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 
+This repository extends the GAC framework (Qu et al., ACL 2025) to systematically compare multiple cooperative game-theoretic solution concepts for understanding attention head interactions in transformers.
 
-This repository provides the official PyTorch implementation of the following paper: 
-> [**Cooperative or Competitive? Understanding the Interaction between Attention Heads From A Game Theory Perspective**]() <br>
-> Xiaoye Qu<sup>1</sup>, 
-> Zengqi Yu<sup>1</sup>,
-> Dongrui Liu<sup>2</sup>,
-> Wei Wei<sup>1</sup>,
-> Daizong Liu<sup>2</sup>,
-> Jianfeng Dong<sup>2</sup>,
-> Yu Cheng<sup>2</sup><br>
-> <sup>1</sup>Huazhong University of Science and Technology, <sup>2</sup>Shanghai AI Laboratory<br>
 ## Overview
-<p align="center"><img src="./figure/game_framework.png" alt="teaser" style="width: 80%; height: auto;"></p>
 
-Despite the remarkable success of attention-based large language models (LLMs), the precise interaction mechanisms between attention heads remain poorly understood.
-In contrast to prevalent methods that focus on individual head contributions, we rigorously analyze the intricate interplay between attention heads by introducing a novel framework leveraging the Harsanyi dividend from cooperative game theory.
-Our analysis reveals that significant positive Harsanyi dividends are sparsely distributed across head combinations, 
-indicating that most heads do not contribute cooperatively. Moreover, certain head combinations exhibit negative dividends, indicating implicit competitive relationships. 
-To further optimize the interactions among attention heads, 
-we propose a training-free Game-theoretic Attention Calibration (GAC) method. 
-Specifically, GAC selectively retains heads demonstrating significant cooperative gains and applies fine-grained distributional adjustments to the remaining heads.
-Comprehensive experiments across 17 benchmarks demonstrate the effectiveness of our proposed GAC and its superior generalization capabilities across diverse model families, scales, and modalities.
-Crucially, the discovered interaction phenomena offer a path toward a deeper understanding of the behaviors of LLMs.
+While Qu et al. applied the **Harsanyi dividend** to analyze attention head coalitions, this extension introduces three additional solution concepts, each answering a fundamentally different question:
+
+| Concept | Question | Attention Head Interpretation |
+|---------|----------|-------------------------------|
+| **Harsanyi Dividend** | What synergy emerges from this coalition? | Do these heads create emergent capabilities together? |
+| **Shapley Value** | What is each player's fair share of credit? | How much does each head contribute on average? |
+| **Core** | Which allocations are stable against deviation? | Can heads coexist without "wanting to leave"? |
+| **Nucleolus** | What minimizes worst-case dissatisfaction? | Which heads are undervalued relative to their potential? |
+
+## Key Findings (Expected)
+
+- **Ranking differences**: Shapley and Harsanyi identify different heads as "important"
+- **Core emptiness**: Many layers have empty Core, confirming inherent competition
+- **Pruning guidance**: Nucleolus excess identifies underutilized heads safe to prune
 
 ## Installation
 
-Follow the steps below to set up the environment and install the necessary dependencies:
+### Using uv (Recommended)
 
-1. Create a new Conda environment:
+```bash
+# Install uv if not already installed
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-```
-conda create --name GAC python=3.9
-conda activate GAC
-```
-
-2. Install the required dependencies: Ensure that pip is installed, then execute the following command:
-
-```
-pip install -r requirements.txt
+# Clone and setup
+cd GAC-Extenstion
+uv sync
 ```
 
-## Run GAC
+### Using pip
 
-### Step 1. Calculate Harsanyi Dividends Between Players for Each Layer
+```bash
+pip install -e .
+```
 
-The first step in the GAC framework involves identifying groups of attention heads that exhibit significant positive Harsanyi dividends.
+### Development Installation
 
-#### 1.1 Classification Task 
-To perform this search on classification datasets, run the following command:
+```bash
+uv sync --extra dev
+```
+
+## Project Structure
 
 ```
+GAC-Extenstion/
+├── solution_concepts/          # NEW: Solution concept implementations
+│   ├── __init__.py
+│   ├── harsanyi.py            # Harsanyi dividend (refactored from original)
+│   ├── shapley.py             # Shapley value computation
+│   ├── core.py                # Core existence and computation
+│   ├── nucleolus.py           # Nucleolus via sequential LP
+│   └── utils.py               # Utilities for comparison
+├── tests/                      # NEW: Unit tests
+│   └── test_solution_concepts.py
+├── tools/                      # Original GAC tools
+│   └── compute_harsanyi_dividends.py
+├── model_aug/                  # Original GAC attention augmentation
+├── utils/                      # Original GAC data utilities
+├── game_theory.py              # Original GAC main script
+├── pyproject.toml              # NEW: Project configuration for uv
+└── README.md                   # This file
+```
+
+## Quick Start
+
+### 1. Compute Coalition Values (Original GAC)
+
+First, run the original GAC pipeline to compute v(S) for all coalitions:
+
+```bash
+# For classification tasks
 bash scripts/compute_game_theory_cf.sh
-```
 
-#### 1.2 Multiple Choice Task
-
-For multiple-choice datasets, use the following command:
-
-```
+# For multiple choice tasks
 bash scripts/compute_game_theory_mc.sh
 ```
 
-#### 1.3 Question Answer Task
-To conduct this search on question-answering datasets, execute the following command:
+### 2. Compare Solution Concepts (New)
 
-```
-bash scripts/compute_game_theory_qa.sh
-```
+```python
+from solution_concepts import compare_solution_concepts
+from solution_concepts.utils import load_coalition_values
 
-#### 1.4 POPE Task
-For MLLM's POPE datasets, run the following command:
+# Load coalition values from GAC output
+v_values = load_coalition_values("path/to/harsanyi_dividend_headComb.log")
 
-```
-bash scripts/compute_game_theory_pope.sh
-```
+# Compute all four solution concepts
+results = compare_solution_concepts(v_values, num_players=8)
 
-### Step 2. Identify the Salient Group
-
-After calculating the Harsanyi dividends, use the following command to select the salient group:
-
-```
-bash scripts/get_salient_group.sh [eval_task_type]
+# Access results
+print("Shapley values:", results['shapley']['values'])
+print("Core exists:", results['core']['exists'])
+print("Nucleolus:", results['nucleolus']['allocation'])
+print("Ranking correlation:", results['comparison']['shapley_nucleolus_correlation'])
 ```
 
-### Step 3. Evaluation
+### 3. Individual Concept Usage
 
-To mitigate the competition between attention heads that results in negative Harsanyi dividends, we apply fine-grained distributional adjustments to the heads outside the salient group. This process smooths out excessive attention weight allocations.
+```python
+from solution_concepts import (
+    compute_harsanyi_dividends,
+    compute_shapley_values,
+    compute_core,
+    compute_nucleolus
+)
 
-Run the following command to complete this process:
+# Harsanyi dividends (synergy analysis)
+dividends = compute_harsanyi_dividends(v_values, num_players=8)
+print(f"Positive dividends: {sum(1 for w in dividends.values() if w > 0)}")
+print(f"Negative dividends: {sum(1 for w in dividends.values() if w < 0)}")
+
+# Shapley values (individual importance)
+shapley = compute_shapley_values(v_values, num_players=8)
+top_heads = sorted(shapley.items(), key=lambda x: x[1], reverse=True)[:3]
+print(f"Top 3 heads by Shapley: {top_heads}")
+
+# Core (stability analysis)
+core_result = compute_core(v_values, num_players=8)
+if core_result['exists']:
+    print("Core is non-empty - stable configuration exists")
+else:
+    print("Core is empty - inherent competition between heads")
+
+# Nucleolus (fairness analysis)
+nucleolus = compute_nucleolus(v_values, num_players=8)
+print(f"Nucleolus allocation: {nucleolus}")
+```
+
+## Running Tests
+
+```bash
+# Run all tests
+uv run pytest tests/ -v
+
+# Run with coverage
+uv run pytest tests/ --cov=solution_concepts --cov-report=html
+```
+
+## Solution Concepts Explained
+
+### Harsanyi Dividend
+
+The Harsanyi dividend captures the **pure interaction effect** of a coalition:
 
 ```
-bash evaluation.sh [augmentations] [dataset_names] [model_type] [model_path] [eval_task_type]
+w(S) = Σ_{T⊆S} (-1)^{|T|-|S|} · v(T)
 ```
 
-### Arguments
+- **Positive dividend**: Heads in S create emergent capability together
+- **Negative dividend**: Heads interfere or compete (redundancy)
+- **Zero dividend**: Heads are independent
 
-| Argument             | Example             | Description   |
-| -------------------- | ------------------- | ------------- |
-| `--ckpt_dir`    | `Llama-3.1-8B-Instruct` | Model address. |
-| `--calibrate`    | `1` | Whether to compute the Harsanyi dividend. |
-| `--dataset`    | `sst2` | The dataset to be evaluated. |
-| `--do_augmentation`    | `0` | Whether to use GAC. |
-| `--num_samples`    | `900` | Number of game theory samples from each dataset. |
-| `--output_dir`    | `/path/to/result` | Result output file. |
-| `--task_type`    | `multiple_choice` | Type of task to be evaluated. |
-| `--game_theory_result_path`    | `/path/to/intermediate_result` | Intermediate result output address for game theory. |
+### Shapley Value
 
-## Directory Structure
+The Shapley value measures **average marginal contribution**:
 
-Below is an overview of the key directories and files in this repository:
-
-* model_aug:  Contains the core methods for our GAC framework.
-* transformers: Includes the core code of the transformers library.
-* tools: Contains code for calculating intermediate results.
-* utils: Defines methods for data loading and preprocessing.
-* game_theory.py: The main code for calculating game theory-related metrics.
-* main.py: The central code for model evaluation.
-
-
-## Datasets and Model
-
-The datasets and models we used are as follows.
-
-### Datasets
-* sst2
-* sst5
-* MR
-* SUBJ
-* AGNews
-* TREC
-* CB
-* BoolQ
-* hellaswag
-* ARCE
-* PIQA
-* ARCC
-* OB
-* CQA
-* SQuADv1
-* SQuADv2
-* [MSCOCO 2014 dataset](https://cocodataset.org/#home)
-* [GQA dataset](https://cs.stanford.edu/people/dorarad/gqa/download.html)
-
-### Models
-
-* [Llama-3.1-8B-Instruct
-](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct)
-* [Qwen2.5-7B-Instruct
-](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct)
-* [Qwen2.5-14B-Instruct](https://huggingface.co/Qwen/Qwen2.5-14B-Instruct)
-* [Qwen2.5-32B-Instruct
-](https://huggingface.co/Qwen/Qwen2.5-32B-Instruct)
-* [llava-v1.6-mistral-7b-hf](https://huggingface.co/llava-hf/llava-v1.6-mistral-7b-hf)
-
-<!---## Citation
-If you find this work useful for your research, please cite [our paper]():
 ```
-@-->
+φᵢ = Σ_{S⊆N\{i}} [|S|!(|N|-|S|-1)!/|N|!] · [v(S∪{i}) - v(S)]
+```
+
+- High value: Head is consistently useful regardless of context
+- Satisfies efficiency: Σφᵢ = v(N)
+
+### Core
+
+The Core is the set of **stable allocations**:
+
+```
+Core = {x : Σxᵢ = v(N), Σᵢ∈S xᵢ ≥ v(S) ∀S}
+```
+
+- Non-empty Core: Stable configuration exists
+- Empty Core: Inherent instability (connects to negative Harsanyi dividends)
+
+### Nucleolus
+
+The Nucleolus **minimizes worst-case dissatisfaction**:
+
+```
+x* = argmin_x [lexicographically minimize sorted excess vector]
+excess(S, x) = v(S) - Σᵢ∈S xᵢ
+```
+
+- High excess: Coalition S is "undervalued"
+- Always exists and is unique
+- Always in Core (if Core is non-empty)
+
+## Mathematical Properties
+
+| Property | Harsanyi | Shapley | Core | Nucleolus |
+|----------|----------|---------|------|-----------|
+| Always exists | ✓ | ✓ | ✗ | ✓ |
+| Unique | ✓ | ✓ | ✗ | ✓ |
+| Efficiency | ✓ | ✓ | ✓ | ✓ |
+| Individual rationality | - | ✓ | ✓ | ✓ |
+| Computational complexity | O(2ⁿ) | O(2ⁿ) | LP | Sequential LP |
+
+## Citation
+
+If you use this code, please cite:
+
+```bibtex
+@inproceedings{qu2025cooperative,
+  title={Cooperative or Competitive? Understanding the Interaction between
+         Attention Heads From A Game Theory Perspective},
+  author={Qu, Xiaoye and Yu, Zengqi and Liu, Dongrui and Wei, Wei and
+          Liu, Daizong and Dong, Jianfeng and Cheng, Yu},
+  booktitle={Proceedings of the 63rd Annual Meeting of the Association
+             for Computational Linguistics (ACL)},
+  year={2025}
+}
+```
+
+## License
+
+MIT License - see LICENSE file for details.
+
+## Acknowledgments
+
+- Original GAC implementation: [Qu et al.](https://github.com/queng12322/GAC)
+- Game theory foundations: Shapley (1953), Harsanyi (1982), Schmeidler (1969)
