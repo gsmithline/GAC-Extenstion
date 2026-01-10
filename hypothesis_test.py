@@ -224,8 +224,84 @@ def validate_fairness_hypothesis(
     }
 
 
-def run_hypothesis_validation(use_model: bool = False, model_name: str = "gpt2", use_gpu: bool = False):
-    """Run full hypothesis validation pipeline."""
+def load_dataset_prompts(dataset_name: str = "sst2", num_samples: int = 10, seed: int = 42) -> List[Tuple[str, int]]:
+    """
+    Load prompts from a dataset for evaluation.
+
+    Args:
+        dataset_name: Name of dataset ("sst2", "imdb", or "custom")
+        num_samples: Number of samples to load
+        seed: Random seed for sampling
+
+    Returns:
+        List of (text, label) tuples
+    """
+    random.seed(seed)
+
+    if dataset_name == "sst2":
+        try:
+            from datasets import load_dataset
+            dataset = load_dataset("glue", "sst2", split="validation")
+            indices = random.sample(range(len(dataset)), min(num_samples, len(dataset)))
+            return [(dataset[i]["sentence"], dataset[i]["label"]) for i in indices]
+        except ImportError:
+            print("    datasets library not found, using built-in prompts")
+            return get_builtin_prompts(num_samples)
+    elif dataset_name == "imdb":
+        try:
+            from datasets import load_dataset
+            dataset = load_dataset("imdb", split="test")
+            indices = random.sample(range(len(dataset)), min(num_samples, len(dataset)))
+            return [(dataset[i]["text"][:200], dataset[i]["label"]) for i in indices]  # Truncate long reviews
+        except ImportError:
+            print("    datasets library not found, using built-in prompts")
+            return get_builtin_prompts(num_samples)
+    else:
+        return get_builtin_prompts(num_samples)
+
+
+def get_builtin_prompts(num_samples: int = 10) -> List[Tuple[str, int]]:
+    """Built-in sentiment prompts for testing without datasets library."""
+    prompts = [
+        # Positive (label=1)
+        ("This movie was absolutely fantastic!", 1),
+        ("I loved every minute of this film.", 1),
+        ("An incredible performance by the entire cast.", 1),
+        ("The best movie I have seen this year.", 1),
+        ("A masterpiece of modern cinema.", 1),
+        ("Brilliant writing and stunning visuals.", 1),
+        ("I was completely blown away by this.", 1),
+        ("A heartwarming and uplifting experience.", 1),
+        # Negative (label=0)
+        ("This movie was terrible and boring.", 0),
+        ("I hated every minute of this film.", 0),
+        ("A complete waste of time and money.", 0),
+        ("The worst movie I have ever seen.", 0),
+        ("Awful acting and a terrible plot.", 0),
+        ("I could not wait for it to end.", 0),
+        ("A disappointing and frustrating experience.", 0),
+        ("Poorly written with no redeeming qualities.", 0),
+    ]
+    random.shuffle(prompts)
+    return prompts[:num_samples]
+
+
+def run_hypothesis_validation(
+    use_model: bool = False,
+    model_name: str = "gpt2",
+    use_gpu: bool = False,
+    dataset: str = "builtin",
+    num_samples: int = 10
+):
+    """Run full hypothesis validation pipeline.
+
+    Args:
+        use_model: Use a real transformer model (vs synthetic data)
+        model_name: HuggingFace model name
+        use_gpu: Use CUDA if available
+        dataset: Dataset to use ("sst2", "imdb", or "builtin")
+        num_samples: Number of prompts to evaluate
+    """
 
     print("=" * 70)
     print("GAC Extension - Hypothesis Validation Test")
@@ -243,7 +319,7 @@ def run_hypothesis_validation(use_model: bool = False, model_name: str = "gpt2",
         device = "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
         print(f"\nDevice: {device}")
 
-        print(f"\n[1/5] Loading model: {model_name}...")
+        print(f"\n[1/6] Loading model: {model_name}...")
 
         # Load tokenizer and model
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
@@ -269,14 +345,14 @@ def run_hypothesis_validation(use_model: bool = False, model_name: str = "gpt2",
 
         model.eval()
 
-        # Compute coalition values from model with actual head masking
-        print("\n[2/5] Computing coalition values from model...")
-        text = "This movie was absolutely fantastic!"
-        inputs = tokenizer(text, return_tensors="pt")
-        if not is_llama or not use_gpu:
-            inputs = {k: v.to(device) for k, v in inputs.items()}
+        # Load prompts from dataset
+        print(f"\n[2/6] Loading prompts from {dataset} dataset...")
+        prompts = load_dataset_prompts(dataset, num_samples)
+        print(f"    Loaded {len(prompts)} prompts")
 
+        # Get token IDs for sentiment
         pos_token = tokenizer.encode(" positive", add_special_tokens=False)[0]
+        neg_token = tokenizer.encode(" negative", add_special_tokens=False)[0]
 
         # Get model config
         if is_llama:
@@ -325,30 +401,38 @@ def run_hypothesis_validation(use_model: bool = False, model_name: str = "gpt2",
             hook = attn_module.register_forward_hook(create_head_mask_hook(layer_idx))
             hooks.append(hook)
 
-        # Get baseline (all heads active)
-        with torch.no_grad():
-            outputs = model(**inputs)
-            logits = outputs.logits[0, -1, :]
-            probs = F.softmax(logits.float(), dim=-1)
-            baseline_prob = probs[pos_token].item()
+        # Compute coalition values averaged across all prompts
+        print(f"\n[3/6] Computing coalition values across {len(prompts)} prompts...")
+        all_v_values = {coalition: [] for coalition in range(2 ** num_heads)}
 
-        print(f"    Baseline probability for 'positive': {baseline_prob:.4f}")
+        for prompt_idx, (text, label) in enumerate(prompts):
+            # Use appropriate target token based on label
+            target_token = pos_token if label == 1 else neg_token
 
+            inputs = tokenizer(text, return_tensors="pt")
+            if not is_llama or not use_gpu:
+                inputs = {k: v.to(device) for k, v in inputs.items()}
+
+            print(f"    [{prompt_idx+1}/{len(prompts)}] Processing: {text[:50]}...")
+
+            for coalition in range(2 ** num_heads):
+                if coalition == 0:
+                    all_v_values[coalition].append(0.0)
+                    continue
+
+                # Create mask for this coalition
+                active_heads_mask = [(coalition >> i) & 1 for i in range(num_heads)]
+
+                with torch.no_grad():
+                    outputs = model(**inputs)
+                    logits = outputs.logits[0, -1, :]
+                    probs = F.softmax(logits.float(), dim=-1)
+                    all_v_values[coalition].append(probs[target_token].item())
+
+        # Aggregate coalition values (mean across prompts)
         v_values = {}
-        print(f"    Computing {2**num_heads} coalition values...")
         for coalition in range(2 ** num_heads):
-            if coalition == 0:
-                v_values[coalition] = 0.0
-                continue
-
-            # Create mask for this coalition
-            active_heads_mask = [(coalition >> i) & 1 for i in range(num_heads)]
-
-            with torch.no_grad():
-                outputs = model(**inputs)
-                logits = outputs.logits[0, -1, :]
-                probs = F.softmax(logits.float(), dim=-1)
-                v_values[coalition] = probs[pos_token].item()
+            v_values[coalition] = sum(all_v_values[coalition]) / len(all_v_values[coalition])
 
         # Remove hooks
         for hook in hooks:
@@ -454,11 +538,18 @@ if __name__ == "__main__":
                         help="Model to use: 'gpt2' or a LLaMA path/HF id (e.g., 'meta-llama/Llama-2-7b-hf')")
     parser.add_argument("--use_gpu", action="store_true",
                         help="Use GPU if available (only with --use_model)")
+    parser.add_argument("--dataset", type=str, default="builtin",
+                        choices=["builtin", "sst2", "imdb"],
+                        help="Dataset to use for prompts: 'builtin' (16 examples), 'sst2' (HuggingFace), 'imdb' (HuggingFace)")
+    parser.add_argument("--num_samples", type=int, default=10,
+                        help="Number of prompts to evaluate (default: 10)")
     args = parser.parse_args()
 
     results = run_hypothesis_validation(
         use_model=args.use_model,
         model_name=args.model,
-        use_gpu=args.use_gpu
+        use_gpu=args.use_gpu,
+        dataset=args.dataset,
+        num_samples=args.num_samples
     )
 
