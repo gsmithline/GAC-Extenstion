@@ -401,9 +401,17 @@ def run_hypothesis_validation(
             hook = attn_module.register_forward_hook(create_head_mask_hook(layer_idx))
             hooks.append(hook)
 
-        # Compute coalition values averaged across all prompts
+        # Compute coalition values and solution concepts for each prompt
         print(f"\n[3/6] Computing coalition values across {len(prompts)} prompts...")
-        all_v_values = {coalition: [] for coalition in range(2 ** num_heads)}
+
+        # Storage for per-prompt results
+        all_prompt_v_values = []  # List of v_values dicts per prompt
+        per_prompt_results = []   # Store solution concepts per prompt
+
+        # Tracking for consistency analysis
+        top_synergy_counts = {}   # coalition -> count of times in top 5
+        head_rank_positions = {i: [] for i in range(num_heads)}  # head -> list of ranks
+        core_empty_count = 0
 
         for prompt_idx, (text, label) in enumerate(prompts):
             # Use appropriate target token based on label
@@ -415,9 +423,11 @@ def run_hypothesis_validation(
 
             print(f"    [{prompt_idx+1}/{len(prompts)}] Processing: {text[:50]}...")
 
+            # Compute coalition values for this prompt
+            prompt_v_values = {}
             for coalition in range(2 ** num_heads):
                 if coalition == 0:
-                    all_v_values[coalition].append(0.0)
+                    prompt_v_values[coalition] = 0.0
                     continue
 
                 # Create mask for this coalition
@@ -427,52 +437,116 @@ def run_hypothesis_validation(
                     outputs = model(**inputs)
                     logits = outputs.logits[0, -1, :]
                     probs = F.softmax(logits.float(), dim=-1)
-                    all_v_values[coalition].append(probs[target_token].item())
+                    prompt_v_values[coalition] = probs[target_token].item()
 
-        # Aggregate coalition values (mean across prompts)
-        v_values = {}
-        for coalition in range(2 ** num_heads):
-            v_values[coalition] = sum(all_v_values[coalition]) / len(all_v_values[coalition])
+            # Normalize this prompt's values
+            max_val = max(prompt_v_values.values()) if prompt_v_values else 1.0
+            if max_val > 0:
+                for k in prompt_v_values:
+                    prompt_v_values[k] /= max_val
+
+            all_prompt_v_values.append(prompt_v_values)
+
+            # Compute solution concepts for this prompt
+            prompt_dividends = compute_harsanyi_dividends(prompt_v_values, num_players=num_heads)
+            prompt_shapley = compute_shapley_values(prompt_v_values, num_players=num_heads)
+            prompt_core = compute_core(prompt_v_values, num_players=num_heads)
+            prompt_nucleolus = compute_nucleolus(prompt_v_values, num_players=num_heads)
+
+            # Track top synergistic coalitions
+            top_synergies = get_top_k_coalitions(prompt_dividends, k=5, positive_only=True)
+            for coalition, _ in top_synergies:
+                top_synergy_counts[coalition] = top_synergy_counts.get(coalition, 0) + 1
+
+            # Track head rankings
+            ranking = rank_players_by_shapley(prompt_shapley)
+            for rank, (head, _) in enumerate(ranking):
+                head_rank_positions[head].append(rank)
+
+            # Track core emptiness
+            if not prompt_core.get('exists', False):
+                core_empty_count += 1
+
+            per_prompt_results.append({
+                'prompt': text[:50],
+                'label': label,
+                'dividends': prompt_dividends,
+                'shapley': prompt_shapley,
+                'core': prompt_core,
+                'nucleolus': prompt_nucleolus,
+                'top_synergies': top_synergies,
+            })
 
         # Remove hooks
         for hook in hooks:
             hook.remove()
         active_heads_mask = None
 
-        # Normalize by baseline
-        max_val = max(v_values.values()) if v_values else 1.0
-        if max_val > 0:
-            for k in v_values:
-                v_values[k] /= max_val
+        # Aggregate coalition values (mean across prompts)
+        v_values = {}
+        for coalition in range(2 ** num_heads):
+            values = [pv[coalition] for pv in all_prompt_v_values]
+            v_values[coalition] = sum(values) / len(values)
 
-        print(f"    Computed {len(v_values)} coalition values")
+        print(f"    Computed coalition values for {len(prompts)} prompts")
+
+        # Compute consistency metrics
+        print("\n[4/6] Analyzing consistency across prompts...")
+
+        # Find coalitions that appear in top 5 synergies for >50% of prompts
+        consistent_synergies = []
+        for coalition, count in sorted(top_synergy_counts.items(), key=lambda x: x[1], reverse=True):
+            pct = count / len(prompts) * 100
+            if pct >= 20:  # At least 20% of prompts
+                players = coalition_to_players(coalition, num_heads)
+                consistent_synergies.append((players, count, pct))
+
+        # Compute head ranking stability (mean rank and std dev)
+        head_stability = {}
+        for head in range(num_heads):
+            ranks = head_rank_positions[head]
+            mean_rank = sum(ranks) / len(ranks)
+            variance = sum((r - mean_rank) ** 2 for r in ranks) / len(ranks)
+            std_rank = variance ** 0.5
+            head_stability[head] = {'mean_rank': mean_rank, 'std_rank': std_rank}
+
+        consistency_analysis = {
+            'consistent_synergies': consistent_synergies,
+            'head_stability': head_stability,
+            'core_empty_pct': core_empty_count / len(prompts) * 100,
+            'per_prompt_results': per_prompt_results,
+        }
+
     else:
         # Use synthetic data (fast, no dependencies)
         print("\n[1/5] Generating synthetic coalition values...")
         print("    (Simulating realistic attention head behavior)")
         v_values = create_realistic_coalition_values(num_heads=num_heads, seed=42)
         print(f"    Generated {len(v_values)} coalition values")
+        consistency_analysis = None
 
-    # Compute all solution concepts
-    print("\n[2/5] Computing Harsanyi dividends (synergy analysis)...")
+    # Compute all solution concepts on aggregated values
+    print("\n[5/6] Computing solution concepts on aggregated values...")
+
+    print("    Harsanyi dividends...")
     start = time.time()
     dividends = compute_harsanyi_dividends(v_values, num_players=num_heads)
     synergy_result = validate_synergy_hypothesis(dividends, num_heads)
     print(f"    Done in {time.time() - start:.2f}s")
 
-    print("\n[3/5] Computing Shapley values (importance ranking)...")
+    print("    Shapley values...")
     start = time.time()
     shapley = compute_shapley_values(v_values, num_players=num_heads)
     importance_result = validate_importance_hypothesis(shapley)
     print(f"    Done in {time.time() - start:.2f}s")
 
-    print("\n[4/5] Computing Core (stability analysis)...")
+    print("    Core...")
     start = time.time()
     core_result = compute_core(v_values, num_players=num_heads)
     stability_result = validate_stability_hypothesis(core_result)
     print(f"    Done in {time.time() - start:.2f}s")
 
-    print("\n[5/5] Computing Nucleolus (fairness analysis)...")
+    print("    Nucleolus...")
     start = time.time()
     nucleolus = compute_nucleolus(v_values, num_players=num_heads)
     fairness_result = validate_fairness_hypothesis(nucleolus, v_values, num_heads)
@@ -510,6 +584,48 @@ def run_hypothesis_validation(
     print(f"     Total allocated: {total_alloc:.4f}" if total_alloc is not None else "     Total allocated: N/A (computation failed)")
     print(f"     Grand coalition value: {grand_val:.4f}" if grand_val is not None else "     Grand coalition value: N/A")
 
+    # Print consistency analysis if available (multi-prompt mode)
+    if consistency_analysis is not None:
+        print("\n" + "=" * 70)
+        print("CONSISTENCY ANALYSIS ACROSS PROMPTS")
+        print("=" * 70)
+
+        print("\n[C1] CONSISTENT SYNERGIES (appear in top 5 for ≥20% of prompts)")
+        if consistency_analysis['consistent_synergies']:
+            for players, count, pct in consistency_analysis['consistent_synergies'][:10]:
+                print(f"     Heads {set(players)}: {count}/{len(consistency_analysis['per_prompt_results'])} prompts ({pct:.1f}%)")
+        else:
+            print("     No consistently synergistic coalitions found")
+
+        print("\n[C2] HEAD RANKING STABILITY (lower std = more consistent)")
+        stability = consistency_analysis['head_stability']
+        # Sort by mean rank (best to worst)
+        sorted_heads = sorted(stability.items(), key=lambda x: x[1]['mean_rank'])
+        print("     Head | Mean Rank | Std Dev | Interpretation")
+        print("     " + "-" * 50)
+        for head, stats in sorted_heads:
+            interp = "Stable" if stats['std_rank'] < 1.5 else "Variable" if stats['std_rank'] < 3.0 else "Unstable"
+            print(f"       {head}  |    {stats['mean_rank']:.2f}    |  {stats['std_rank']:.2f}   | {interp}")
+
+        print(f"\n[C3] CORE EMPTINESS RATE: {consistency_analysis['core_empty_pct']:.1f}% of prompts")
+        if consistency_analysis['core_empty_pct'] > 80:
+            print("     -> Heads consistently show competitive dynamics")
+        elif consistency_analysis['core_empty_pct'] > 50:
+            print("     -> Mixed stability - depends on input")
+        else:
+            print("     -> Heads generally cooperate stably")
+
+        # Show per-prompt summary
+        print("\n[C4] PER-PROMPT TOP SYNERGY")
+        for i, result in enumerate(consistency_analysis['per_prompt_results'][:5]):  # Show first 5
+            if result['top_synergies']:
+                top_coal = result['top_synergies'][0]
+                players = coalition_to_players(top_coal[0], num_heads)
+                print(f"     Prompt {i+1}: {result['prompt'][:30]}... -> Top: {set(players)}")
+
+        if len(consistency_analysis['per_prompt_results']) > 5:
+            print(f"     ... and {len(consistency_analysis['per_prompt_results']) - 5} more prompts")
+
     print("\n" + "=" * 70)
     validated_count = sum([
         synergy_result['validated'],
@@ -527,6 +643,7 @@ def run_hypothesis_validation(
         "stability": stability_result,
         "fairness": fairness_result,
         "coalition_values": v_values,
+        "consistency": consistency_analysis,
     }
 
 
