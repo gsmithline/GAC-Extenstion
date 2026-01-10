@@ -421,8 +421,10 @@ def run_hypothesis_validation(use_model: bool = False, model_name: str = "gpt2",
     print("\n[H4] FAIRNESS HYPOTHESIS: Nucleolus provides fair allocation")
     print(f"     Status: {'VALIDATED' if fairness_result['validated'] else 'NOT VALIDATED'}")
     print(f"     Efficiency: {fairness_result['efficiency_satisfied']}")
-    print(f"     Total allocated: {fairness_result['total_allocation']:.4f}")
-    print(f"     Grand coalition value: {fairness_result['grand_coalition_value']:.4f}")
+    total_alloc = fairness_result['total_allocation']
+    grand_val = fairness_result['grand_coalition_value']
+    print(f"     Total allocated: {total_alloc:.4f}" if total_alloc is not None else "     Total allocated: N/A (computation failed)")
+    print(f"     Grand coalition value: {grand_val:.4f}" if grand_val is not None else "     Grand coalition value: N/A")
 
     print("\n" + "=" * 70)
     validated_count = sum([
