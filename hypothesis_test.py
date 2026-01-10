@@ -197,11 +197,22 @@ def validate_fairness_hypothesis(
 
     Evidence: Nucleolus satisfies efficiency and minimizes worst-case dissatisfaction
     """
-    # Check efficiency
     grand_coalition = (1 << num_players) - 1
-    total_allocation = sum(nucleolus.values())
     grand_value = v_values.get(grand_coalition, 0)
 
+    # Handle case where nucleolus computation failed
+    if nucleolus is None:
+        return {
+            "validated": False,
+            "efficiency_satisfied": False,
+            "total_allocation": None,
+            "grand_coalition_value": grand_value,
+            "allocation": None,
+            "error": "Nucleolus computation failed (LP infeasible)",
+        }
+
+    # Check efficiency
+    total_allocation = sum(nucleolus.values())
     efficiency_satisfied = abs(total_allocation - grand_value) < 1e-6
 
     return {
@@ -290,10 +301,9 @@ def run_hypothesis_validation(use_model: bool = False, model_name: str = "gpt2",
                 if layer_idx != target_layer or active_heads_mask is None:
                     return output
 
-                # output shape: (batch, seq_len, hidden_size)
-                # Reshape to (batch, seq_len, num_heads, head_dim)
-                batch_size, seq_len, hidden_size = output[0].shape
-                reshaped = output[0].view(batch_size, seq_len, total_heads, head_dim)
+                # output shape: (batch, seq_len, hidden_size) - it's a tensor, not tuple
+                batch_size, seq_len, hidden_size = output.shape
+                reshaped = output.view(batch_size, seq_len, total_heads, head_dim)
 
                 # Apply mask to first num_heads heads
                 for head_idx in range(num_heads):
@@ -302,7 +312,7 @@ def run_hypothesis_validation(use_model: bool = False, model_name: str = "gpt2",
 
                 # Reshape back
                 masked_output = reshaped.view(batch_size, seq_len, hidden_size)
-                return (masked_output,) + output[1:]
+                return masked_output
             return hook
 
         # Register hooks on attention output projections

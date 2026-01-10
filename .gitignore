@@ -1,2 +1,12 @@
-# 忽略所有的 __pycache__ 文件夹
+# Python
 __pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Remove vendored transformers (use pip install instead)
+transformers/
