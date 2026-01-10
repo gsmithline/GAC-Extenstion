@@ -258,7 +258,7 @@ def run_hypothesis_validation(use_model: bool = False, model_name: str = "gpt2",
 
         model.eval()
 
-        # Compute coalition values from model
+        # Compute coalition values from model with actual head masking
         print("\n[2/5] Computing coalition values from model...")
         text = "This movie was absolutely fantastic!"
         inputs = tokenizer(text, return_tensors="pt")
@@ -267,18 +267,89 @@ def run_hypothesis_validation(use_model: bool = False, model_name: str = "gpt2",
 
         pos_token = tokenizer.encode(" positive", add_special_tokens=False)[0]
 
+        # Get model config
+        if is_llama:
+            n_layers = model.config.num_hidden_layers
+            total_heads = model.config.num_attention_heads
+            head_dim = model.config.hidden_size // total_heads
+        else:
+            n_layers = model.config.n_layer
+            total_heads = model.config.n_head
+            head_dim = model.config.n_embd // total_heads
+
+        # We'll analyze heads in one layer (layer 6 for GPT-2, middle layer)
+        target_layer = n_layers // 2
+        print(f"    Analyzing {num_heads} heads in layer {target_layer}")
+
+        # Create head mask hook
+        active_heads_mask = None
+
+        def create_head_mask_hook(layer_idx):
+            def hook(module, input, output):
+                nonlocal active_heads_mask
+                if layer_idx != target_layer or active_heads_mask is None:
+                    return output
+
+                # output shape: (batch, seq_len, hidden_size)
+                # Reshape to (batch, seq_len, num_heads, head_dim)
+                batch_size, seq_len, hidden_size = output[0].shape
+                reshaped = output[0].view(batch_size, seq_len, total_heads, head_dim)
+
+                # Apply mask to first num_heads heads
+                for head_idx in range(num_heads):
+                    if not active_heads_mask[head_idx]:
+                        reshaped[:, :, head_idx, :] = 0.0
+
+                # Reshape back
+                masked_output = reshaped.view(batch_size, seq_len, hidden_size)
+                return (masked_output,) + output[1:]
+            return hook
+
+        # Register hooks on attention output projections
+        hooks = []
+        for layer_idx in range(n_layers):
+            if is_llama:
+                attn_module = model.model.layers[layer_idx].self_attn.o_proj
+            else:
+                attn_module = model.transformer.h[layer_idx].attn.c_proj
+            hook = attn_module.register_forward_hook(create_head_mask_hook(layer_idx))
+            hooks.append(hook)
+
+        # Get baseline (all heads active)
+        with torch.no_grad():
+            outputs = model(**inputs)
+            logits = outputs.logits[0, -1, :]
+            probs = F.softmax(logits.float(), dim=-1)
+            baseline_prob = probs[pos_token].item()
+
+        print(f"    Baseline probability for 'positive': {baseline_prob:.4f}")
+
         v_values = {}
         print(f"    Computing {2**num_heads} coalition values...")
         for coalition in range(2 ** num_heads):
-            active = bin(coalition).count('1')
             if coalition == 0:
                 v_values[coalition] = 0.0
-            else:
-                with torch.no_grad():
-                    outputs = model(**inputs)
-                    logits = outputs.logits[0, -1, :]
-                    probs = F.softmax(logits.float(), dim=-1)
-                    v_values[coalition] = (probs[pos_token].item() * active / num_heads)
+                continue
+
+            # Create mask for this coalition
+            active_heads_mask = [(coalition >> i) & 1 for i in range(num_heads)]
+
+            with torch.no_grad():
+                outputs = model(**inputs)
+                logits = outputs.logits[0, -1, :]
+                probs = F.softmax(logits.float(), dim=-1)
+                v_values[coalition] = probs[pos_token].item()
+
+        # Remove hooks
+        for hook in hooks:
+            hook.remove()
+        active_heads_mask = None
+
+        # Normalize by baseline
+        max_val = max(v_values.values()) if v_values else 1.0
+        if max_val > 0:
+            for k in v_values:
+                v_values[k] /= max_val
 
         print(f"    Computed {len(v_values)} coalition values")
     else:
@@ -378,3 +449,4 @@ if __name__ == "__main__":
         model_name=args.model,
         use_gpu=args.use_gpu
     )
+
